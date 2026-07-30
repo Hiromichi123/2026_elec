@@ -84,6 +84,9 @@ def generate_launch_description():
             'position_setpoint_topic': '/mavros/setpoint_position/local',
             'velocity_setpoint_topic': '/mavros/setpoint_velocity/cmd_vel',
             'carrier_pose_topic': carrier_pose_topic,
+            'mission_command_topic': '/mission/command',
+            'drone_status_topic': '/drone/status',
+            'airdrop_cmd_topic': '/drone/airdrop_cmd',
         }],
     )
 

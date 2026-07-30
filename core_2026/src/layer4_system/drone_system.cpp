@@ -24,6 +24,7 @@ DroneSystem::DroneSystem() {
         *hal_,              // IStateProvider&
         *hal_,              // IDvsAvoidProvider&
         *hal_,              // ICarrierPoseProvider&
+        *hal_,              // IMissionIO&
         *hal_,              // ICommandPublisher&
         hal_->get_logger()
     );
@@ -54,6 +55,16 @@ DroneSystem::~DroneSystem() {
 
 // main运行入口
 void DroneSystem::run() {
+    hal_->publish_drone_status("WAIT_COMMAND", "waiting /mission/command start task");
+    RCLCPP_INFO(hal_->get_logger(), "[MissionCommand] 等待地面站 /mission/command 启动任务...");
+    while (rclcpp::ok() && !hal_->has_mission_start()) {
+        RCLCPP_INFO_THROTTLE(
+            hal_->get_logger(), *hal_->get_clock(), 3000,
+            "[MissionCommand] 等待命令: ros2 topic pub /mission/command std_msgs/msg/String '{data: \"{\\\"command\\\":\\\"start\\\",\\\"task\\\":1}\"}' -1");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    hal_->publish_drone_status("COMMAND_RECEIVED", "starting preflight");
     pre_flight_checks();
     mission_->run();
 }

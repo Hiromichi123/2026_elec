@@ -17,6 +17,12 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         "platform_target_topic", "/platform/target");
     carrier_pose_topic_ = this->declare_parameter<std::string>(
         "carrier_pose_topic", "/carrier/lidar_pose");
+    mission_command_topic_ = this->declare_parameter<std::string>(
+        "mission_command_topic", "/mission/command");
+    drone_status_topic_ = this->declare_parameter<std::string>(
+        "drone_status_topic", "/drone/status");
+    airdrop_cmd_topic_ = this->declare_parameter<std::string>(
+        "airdrop_cmd_topic", "/drone/airdrop_cmd");
     car_position_kp_speed_ = static_cast<float>(
         this->declare_parameter<double>("car_position_kp_speed", 0.8));
     car_yaw_kp_ = static_cast<float>(
@@ -36,6 +42,10 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         velocity_setpoint_topic_, 10);
     platform_target_pub_ = this->create_publisher<messages::msg::PlatformTarget>(
         platform_target_topic_, 10);
+    drone_status_pub_ = this->create_publisher<std_msgs::msg::String>(
+        drone_status_topic_, 10);
+    airdrop_cmd_pub_ = this->create_publisher<std_msgs::msg::String>(
+        airdrop_cmd_topic_, 10);
 
     // 订阅组
     lidar_sub_ = this->create_subscription<ros2_tools::msg::LidarPose>(
@@ -56,6 +66,9 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
     carrier_pose_sub_ = this->create_subscription<ros2_tools::msg::LidarPose>(
         carrier_pose_topic_, carrier_pose_qos,
         [this](const ros2_tools::msg::LidarPose::SharedPtr msg){ DroneHAL::carrier_pose_cb(msg); });
+    mission_command_sub_ = this->create_subscription<std_msgs::msg::String>(
+        mission_command_topic_, 10,
+        [this](const std_msgs::msg::String::SharedPtr msg){ DroneHAL::mission_command_cb(msg); });
 
     // 客户端
     arming_client_  = this->create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
@@ -73,6 +86,12 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         this->get_logger(),
         "[DroneHAL] 空地协同位姿订阅: carrier_pose_topic=%s",
         carrier_pose_topic_.c_str());
+    RCLCPP_INFO(
+        this->get_logger(),
+        "[DroneHAL] 地面站接口: command=%s, status=%s, airdrop=%s",
+        mission_command_topic_.c_str(),
+        drone_status_topic_.c_str(),
+        airdrop_cmd_topic_.c_str());
 }
 
 // ===== 接口组 =====
@@ -155,6 +174,47 @@ bool DroneHAL::has_recent_carrier_pose(double max_age_sec) const {
 
     const double age_sec = (this->now() - carrier_pose_rx_time_).seconds();
     return age_sec >= 0.0 && age_sec <= max_age_sec;
+}
+
+bool DroneHAL::has_mission_start() const {
+    std::lock_guard<std::mutex> lock(mission_mutex_);
+    return mission_start_requested_;
+}
+
+int DroneHAL::get_mission_task_id() const {
+    std::lock_guard<std::mutex> lock(mission_mutex_);
+    return mission_task_id_;
+}
+
+void DroneHAL::clear_mission_start() {
+    std::lock_guard<std::mutex> lock(mission_mutex_);
+    mission_start_requested_ = false;
+}
+
+void DroneHAL::publish_drone_status(const std::string& phase, const std::string& detail) {
+    std_msgs::msg::String msg;
+    const DroneState s = get_state();
+    const int task_id = get_mission_task_id();
+    msg.data =
+        "{\"role\":\"drone\",\"task\":" + std::to_string(task_id) +
+        ",\"phase\":\"" + phase +
+        "\",\"detail\":\"" + detail +
+        "\",\"x\":" + std::to_string(s.x) +
+        ",\"y\":" + std::to_string(s.y) +
+        ",\"z\":" + std::to_string(s.z) +
+        ",\"yaw\":" + std::to_string(s.yaw) +
+        "}";
+    drone_status_pub_->publish(msg);
+}
+
+void DroneHAL::publish_airdrop_command(const std::string& action) {
+    std_msgs::msg::String msg;
+    msg.data =
+        "{\"role\":\"drone\",\"action\":\"" + action +
+        "\",\"task\":" + std::to_string(get_mission_task_id()) +
+        ",\"stamp_ns\":" + std::to_string(this->now().nanoseconds()) +
+        "}";
+    airdrop_cmd_pub_->publish(msg);
 }
 
 // MAVRos 服务接口
@@ -410,6 +470,29 @@ void DroneHAL::carrier_pose_cb(const ros2_tools::msg::LidarPose::SharedPtr msg) 
     has_carrier_pose_ = true;
 }
 
+void DroneHAL::mission_command_cb(const std_msgs::msg::String::SharedPtr msg) {
+    std::string command;
+    int task_id = 1;
+    extract_json_string(msg->data, "command", command);
+    extract_json_int(msg->data, "task", task_id);
+
+    if (command != "start") {
+        return;
+    }
+    if (task_id != 1 && task_id != 2) {
+        RCLCPP_WARN(this->get_logger(), "[MissionCommand] 不支持的任务编号: %d", task_id);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mission_mutex_);
+        mission_task_id_ = task_id;
+        mission_start_requested_ = true;
+    }
+    RCLCPP_INFO(this->get_logger(), "[MissionCommand] 收到地面站启动任务: task=%d", task_id);
+    publish_drone_status("COMMAND_RECEIVED", "mission start accepted");
+}
+
 bool DroneHAL::extract_json_int64(const std::string& json, const std::string& key, int64_t& out) {
     const std::string token = "\"" + key + "\"";
     const size_t key_pos = json.find(token);
@@ -450,6 +533,15 @@ bool DroneHAL::extract_json_int64(const std::string& json, const std::string& ke
     }
 }
 
+bool DroneHAL::extract_json_int(const std::string& json, const std::string& key, int& out) {
+    int64_t value = 0;
+    if (!extract_json_int64(json, key, value)) {
+        return false;
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
 bool DroneHAL::extract_json_bool(const std::string& json, const std::string& key, bool& out) {
     const std::string token = "\"" + key + "\"";
     const size_t key_pos = json.find(token);
@@ -479,6 +571,30 @@ bool DroneHAL::extract_json_bool(const std::string& json, const std::string& key
         return true;
     }
     return false;
+}
+
+bool DroneHAL::extract_json_string(const std::string& json, const std::string& key, std::string& out) {
+    const std::string token = "\"" + key + "\"";
+    const size_t key_pos = json.find(token);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+
+    const size_t colon_pos = json.find(':', key_pos + token.size());
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+
+    size_t first_quote = json.find('"', colon_pos + 1);
+    if (first_quote == std::string::npos) {
+        return false;
+    }
+    size_t second_quote = json.find('"', first_quote + 1);
+    if (second_quote == std::string::npos) {
+        return false;
+    }
+    out = json.substr(first_quote + 1, second_quote - first_quote - 1);
+    return true;
 }
 
 void DroneHAL::log_dvs_pipeline_latency_if_applicable(const char* command_type) {

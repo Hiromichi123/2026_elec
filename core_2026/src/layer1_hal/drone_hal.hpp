@@ -20,6 +20,7 @@
 #include "layer1_hal/i_command_publisher.hpp"
 #include "layer1_hal/i_dvs_avoid_provider.hpp"
 #include "layer1_hal/i_carrier_pose_provider.hpp"
+#include "layer1_hal/i_mission_io.hpp"
 
 /**
  * @brief 硬件抽象层（Layer 1 · HAL Concrete）
@@ -38,6 +39,7 @@ class DroneHAL
     , public ICommandPublisher
     , public IDvsAvoidProvider
     , public ICarrierPoseProvider
+    , public IMissionIO
 {
 public:
     explicit DroneHAL();
@@ -59,6 +61,13 @@ public:
     // 空地协同目标位姿提供接口 ICarrierPoseProvider
     [[nodiscard]] DroneState get_carrier_pose() const override;
     [[nodiscard]] bool has_recent_carrier_pose(double max_age_sec) const override;
+
+    // 地面站任务命令/状态接口 IMissionIO
+    [[nodiscard]] bool has_mission_start() const override;
+    [[nodiscard]] int get_mission_task_id() const override;
+    void clear_mission_start() override;
+    void publish_drone_status(const std::string& phase, const std::string& detail) override;
+    void publish_airdrop_command(const std::string& action) override;
 
     // MAVROS 服务接口（供 DroneSystem 触发）
     bool request_arm(bool arm = true); // 请求px4解锁并等待响应，返回飞控是否接受
@@ -82,9 +91,12 @@ private:
     void dvs_detection_cb(const std_msgs::msg::String::SharedPtr msg);
     void dvs_avoid_cb(const geometry_msgs::msg::Twist::SharedPtr msg);
     void carrier_pose_cb(const ros2_tools::msg::LidarPose::SharedPtr msg);
+    void mission_command_cb(const std_msgs::msg::String::SharedPtr msg);
 
     static bool extract_json_int64(const std::string& json, const std::string& key, int64_t& out);
     static bool extract_json_bool(const std::string& json, const std::string& key, bool& out);
+    static bool extract_json_int(const std::string& json, const std::string& key, int& out);
+    static bool extract_json_string(const std::string& json, const std::string& key, std::string& out);
     static PlatformMode parse_platform_mode(const std::string& mode_name);
     static float normalize_angle(float angle_rad);
     void log_dvs_pipeline_latency_if_applicable(const char* command_type);
@@ -99,6 +111,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr  pos_pub_;
     rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr vel_pub_;
     rclcpp::Publisher<messages::msg::PlatformTarget>::SharedPtr    platform_target_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr            drone_status_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr            airdrop_cmd_pub_;
 
     // ===== 订阅器 =====
     rclcpp::Subscription<ros2_tools::msg::LidarPose>::SharedPtr    lidar_sub_;
@@ -106,6 +120,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr         dvs_detection_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr     dvs_avoid_sub_;
     rclcpp::Subscription<ros2_tools::msg::LidarPose>::SharedPtr    carrier_pose_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr         mission_command_sub_;
 
     // ===== 服务客户端 =====
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
@@ -131,6 +146,11 @@ private:
     rclcpp::Time       carrier_pose_rx_time_{0, 0, RCL_SYSTEM_TIME};
     bool               has_carrier_pose_{false};
 
+    // 地面站任务命令
+    mutable std::mutex mission_mutex_;
+    bool               mission_start_requested_{false};
+    int                mission_task_id_{1};
+
     // MAVRos状态
     mutable std::mutex      mavros_mutex_;
     mavros_msgs::msg::State mavros_state_{};
@@ -141,6 +161,9 @@ private:
     std::string velocity_setpoint_topic_{"/mavros/setpoint_velocity/cmd_vel"};
     std::string platform_target_topic_{"/platform/target"};
     std::string carrier_pose_topic_{"/carrier/lidar_pose"};
+    std::string mission_command_topic_{"/mission/command"};
+    std::string drone_status_topic_{"/drone/status"};
+    std::string airdrop_cmd_topic_{"/drone/airdrop_cmd"};
     float car_position_kp_speed_{0.8f};
     float car_yaw_kp_{1.5f};
     float car_max_speed_mps_{0.6f};
