@@ -65,6 +65,13 @@ public:
     // 地面站任务命令/状态接口 IMissionIO
     [[nodiscard]] bool has_mission_start() const override;
     [[nodiscard]] int get_mission_task_id() const override;
+    [[nodiscard]] float get_field_origin_x() const override { return field_origin_x_; }
+    [[nodiscard]] float get_field_origin_y() const override { return field_origin_y_; }
+    [[nodiscard]] float get_field_origin_z() const override { return field_origin_z_; }
+    [[nodiscard]] float get_field_origin_yaw() const override { return field_origin_yaw_; }
+    [[nodiscard]] int get_car_wp_index() const override;
+    [[nodiscard]] int get_car_task_id() const override;
+    [[nodiscard]] bool has_recent_car_status(double max_age_sec) const override;
     void clear_mission_start() override;
     void publish_drone_status(const std::string& phase, const std::string& detail) override;
     void publish_airdrop_command(const std::string& action) override;
@@ -91,6 +98,7 @@ private:
     void dvs_detection_cb(const std_msgs::msg::String::SharedPtr msg);
     void dvs_avoid_cb(const geometry_msgs::msg::Twist::SharedPtr msg);
     void carrier_pose_cb(const ros2_tools::msg::LidarPose::SharedPtr msg);
+    void car_status_cb(const std_msgs::msg::String::SharedPtr msg);
     void mission_command_cb(const std_msgs::msg::String::SharedPtr msg);
 
     static bool extract_json_int64(const std::string& json, const std::string& key, int64_t& out);
@@ -100,12 +108,16 @@ private:
     static PlatformMode parse_platform_mode(const std::string& mode_name);
     static float normalize_angle(float angle_rad);
     void log_dvs_pipeline_latency_if_applicable(const char* command_type);
+    Target field_target_to_px4_local(const Target& target) const;
+    Velocity field_velocity_to_px4_local(const Velocity& velocity) const;
     void publish_px4_drone_position(Target& target);
     void publish_px4_drone_velocity(Velocity& velocity);
     void publish_car_position_target(const Target& target, bool use_custom_ackermann);
     void publish_car_velocity_target(Velocity& velocity, bool use_custom_ackermann);
     messages::msg::PlatformTarget make_platform_target_from_position(const Target& target) const;
     messages::msg::PlatformTarget make_platform_target_from_velocity(const Velocity& velocity) const;
+    void publish_status_message(const std::string& phase, const std::string& detail);
+    void publish_status_heartbeat();
 
     // ===== 发布器组 =====
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr  pos_pub_;
@@ -120,7 +132,9 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr         dvs_detection_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr     dvs_avoid_sub_;
     rclcpp::Subscription<ros2_tools::msg::LidarPose>::SharedPtr    carrier_pose_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr         car_status_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr         mission_command_sub_;
+    rclcpp::TimerBase::SharedPtr                                   status_timer_;
 
     // ===== 服务客户端 =====
     rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arming_client_;
@@ -151,6 +165,16 @@ private:
     bool               mission_start_requested_{false};
     int                mission_task_id_{1};
 
+    mutable std::mutex car_status_mutex_;
+    int                car_wp_index_{-1};
+    int                car_task_id_{0};
+    rclcpp::Time       car_status_rx_time_{0, 0, RCL_SYSTEM_TIME};
+    bool               has_car_status_{false};
+
+    mutable std::mutex status_mutex_;
+    std::string        last_status_phase_{"BOOT"};
+    std::string        last_status_detail_{"drone node alive"};
+
     // MAVRos状态
     mutable std::mutex      mavros_mutex_;
     mavros_msgs::msg::State mavros_state_{};
@@ -160,7 +184,9 @@ private:
     std::string position_setpoint_topic_{"/mavros/setpoint_position/local"};
     std::string velocity_setpoint_topic_{"/mavros/setpoint_velocity/cmd_vel"};
     std::string platform_target_topic_{"/platform/target"};
+    std::string lidar_pose_topic_{"/drone/lidar_data"};
     std::string carrier_pose_topic_{"/carrier/lidar_pose"};
+    std::string car_status_topic_{"/car/status"};
     std::string mission_command_topic_{"/mission/command"};
     std::string drone_status_topic_{"/drone/status"};
     std::string airdrop_cmd_topic_{"/drone/airdrop_cmd"};
@@ -169,4 +195,9 @@ private:
     float car_max_speed_mps_{0.6f};
     float car_max_yaw_rate_radps_{1.0f};
     float car_xy_tolerance_m_{0.08f};
+    bool field_frame_enabled_{false};
+    float field_origin_x_{1.125f};
+    float field_origin_y_{1.125f};
+    float field_origin_z_{0.0f};
+    float field_origin_yaw_{1.5707963f};
 };

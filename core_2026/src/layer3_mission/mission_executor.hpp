@@ -48,23 +48,27 @@ private:
     void on_land();
 
     // ===== 具名常量组 =====
-	    static constexpr float  kHomeX                    = 0.75f;  // H点 x: 75cm
-	    static constexpr float  kHomeY                    = 0.75f;  // H点 y: 75cm
-	    static constexpr float  kHomeAltitude             = 1.50f;  // 巡航高度: 150cm
-	    static constexpr float  kHomeYaw                  = 0.0f;   // 起始等待点偏航
+	    static constexpr float  kHomeAltitude             = 1.40f;  // 巡航高度: 140cm
 	    static constexpr float  kPreFollowWaitSec         = 3.0f;   // 跟随前等待时间
-	    static constexpr float  kTask1PreDropFollowSec    = 2.0f;   // 任务一抛投前稳定伴飞
-	    static constexpr float  kTask1PostDropFollowSec   = 2.0f;   // 任务一抛投后短暂伴飞
+	    static constexpr float  kTask1FollowTimeoutSec    = 60.0f;  // 任务一：最长追踪时间
+	    static constexpr float  kTask1FollowStableSec     = 1.0f;   // 任务一：追到后稳定伴飞时间
+	    static constexpr float  kTask1FollowTolerance     = 0.25f;  // 任务一：追到判定半径
 	    static constexpr float  kTask2SearchFollowSec     = 5.0f;   // 任务二巡航寻找/跟随
-	    static constexpr float  kTask2CarrierLandSec      = 7.0f;   // 任务二动态降落到车上
+	    static constexpr float  kTask2WaitCdFollowSliceSec = 0.5f;  // 任务二等待CD段时的伴飞片段
+	    static constexpr int    kTask2CdWpIndex           = 8;      // 小车C->D直线段航点索引
+	    static constexpr float  kTask2CarStatusMaxAgeSec  = 1.0f;   // 小车状态最大允许延迟
+	    static constexpr float  kTask2CarrierLandSec      = 7.0f;   // 任务二CD段动态缓降
 	    static constexpr float  kTask2StayOnCarrierSec    = 5.0f;   // 任务二车上停留
 	    static constexpr float  kTask2CarrierTakeoffSec   = 3.0f;   // 任务二从车上复飞
 	    static constexpr float  kCarrierPoseMaxAgeSec     = 0.5f;   // 小车位姿最大允许延迟
 	    static constexpr float  kCarrierForwardOffset     = 0.0f;   // 沿小车前方偏移
 	    static constexpr float  kCarrierLeftOffset        = 0.0f;   // 沿小车左侧偏移
 	    static constexpr float  kCarrierLandingAltitude   = 0.15f;  // 车载平台上方低高度
+	    static constexpr float  kCarrierLandingProjectionZ = -5.0f; // 模拟降落不可达投影高度
     static constexpr float  kLandVz           = -0.20f;   // 降落速度
     static constexpr float  kLandDuration     = 5.0f;     // 降落持续秒
+    static constexpr float  kLandingApproachAltitude = 0.25f; // 降落前H点近地点高度
+    static constexpr float  kLandingApproachTolerance = 0.08f; // 近地点精确判定半径
 
     // ===== 成员组 =====
     FlightController& fc_;

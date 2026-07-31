@@ -13,6 +13,9 @@
 #include "named_args.hpp"
 
 constexpr float DEFAULT_POS_CHECK_DISTANCE = 0.25f;
+constexpr float DEFAULT_MAX_PLANAR_SPEED_MPS = 0.30f;
+constexpr float DEFAULT_MAX_ASCENT_SPEED_MPS = 1.00f;
+constexpr float DEFAULT_MAX_DESCENT_SPEED_MPS = 0.20f;
 
 /**
  * @struct PidConfig
@@ -65,7 +68,8 @@ public:
     void fly_to_target_pid(const Target& target,
                            float timeout_sec     = 10.0f,
                            float stable_time_sec = 0.1f,
-                           int   frame_rate      = 30);
+                           int   frame_rate      = 30,
+                           float acceptance_distance = DEFAULT_POS_CHECK_DISTANCE);
 
     // 速度 PID（具名参数）
     template<typename... Args, std::enable_if_t<(named_args::is_arg_v<Args> && ...), int> = 0>
@@ -100,6 +104,15 @@ public:
                         float left_offset = 0.0f,
                         float max_pose_age_sec = 0.5f,
                         int frame_rate = 20);
+
+    void follow_carrier_until_stable(float timeout_sec,
+                                     float stable_time_sec,
+                                     float follow_altitude,
+                                     float forward_offset = 0.0f,
+                                     float left_offset = 0.0f,
+                                     float max_pose_age_sec = 0.5f,
+                                     float acceptance_distance = 0.25f,
+                                     int frame_rate = 20);
 
     // 运行时更新 PID 增益
     void set_pid_config(PidConfig cfg);
@@ -140,7 +153,8 @@ private:
     void fly_to_target_pid_impl(const Target& target,
                                 float timeout_sec,
                                 float stable_time_sec,
-                                int   frame_rate);
+                                int   frame_rate,
+                                float acceptance_distance);
 
     // 速度飞行，单次发布 impl
     void fly_by_velocity_impl(const Velocity& velocity);
@@ -158,6 +172,17 @@ private:
                              float left_offset,
                              float max_pose_age_sec,
                              int frame_rate);
+
+    void follow_carrier_until_stable_impl(float timeout_sec,
+                                          float stable_time_sec,
+                                          float follow_altitude,
+                                          float forward_offset,
+                                          float left_offset,
+                                          float max_pose_age_sec,
+                                          float acceptance_distance,
+                                          int frame_rate);
+
+    Velocity limit_linear_speed(const Velocity& velocity) const;
 
     // 运行时更新 PID 增益 impl
     void set_pid_config_impl(PidConfig cfg);
@@ -223,7 +248,12 @@ inline void FlightController::fly_to_target_pid(Args&&... args) {
 
     ::Target target_val = named_args::get<TargetTag>(::Target{}, std::forward<Args>(args)...);
 
-    fly_to_target_pid_impl(target_val, timeout_sec_val, stable_time_sec_val, frame_rate_val);
+    fly_to_target_pid_impl(
+        target_val,
+        timeout_sec_val,
+        stable_time_sec_val,
+        frame_rate_val,
+        DEFAULT_POS_CHECK_DISTANCE);
 }
 
 // ── 速度飞行，单次发布 ──────────────────────────────────────────────────────

@@ -15,8 +15,12 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         "velocity_setpoint_topic", "/mavros/setpoint_velocity/cmd_vel");
     platform_target_topic_ = this->declare_parameter<std::string>(
         "platform_target_topic", "/platform/target");
+    lidar_pose_topic_ = this->declare_parameter<std::string>(
+        "lidar_pose_topic", "/drone/lidar_data");
     carrier_pose_topic_ = this->declare_parameter<std::string>(
         "carrier_pose_topic", "/carrier/lidar_pose");
+    car_status_topic_ = this->declare_parameter<std::string>(
+        "car_status_topic", "/car/status");
     mission_command_topic_ = this->declare_parameter<std::string>(
         "mission_command_topic", "/mission/command");
     drone_status_topic_ = this->declare_parameter<std::string>(
@@ -33,6 +37,15 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         this->declare_parameter<double>("car_max_yaw_rate_radps", 1.0));
     car_xy_tolerance_m_ = static_cast<float>(
         this->declare_parameter<double>("car_xy_tolerance_m", 0.08));
+    field_frame_enabled_ = this->declare_parameter<bool>("field_frame_enabled", false);
+    field_origin_x_ = static_cast<float>(
+        this->declare_parameter<double>("field_origin_x", 1.125));
+    field_origin_y_ = static_cast<float>(
+        this->declare_parameter<double>("field_origin_y", 1.125));
+    field_origin_z_ = static_cast<float>(
+        this->declare_parameter<double>("field_origin_z", 0.0));
+    field_origin_yaw_ = static_cast<float>(
+        this->declare_parameter<double>("field_origin_yaw", 1.57079632679));
     platform_mode_ = parse_platform_mode(platform_mode_name_);
 
     // 发布组
@@ -46,10 +59,13 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         drone_status_topic_, 10);
     airdrop_cmd_pub_ = this->create_publisher<std_msgs::msg::String>(
         airdrop_cmd_topic_, 10);
+    status_timer_ = this->create_wall_timer(
+        std::chrono::seconds(1),
+        [this]() { publish_status_heartbeat(); });
 
     // 订阅组
     lidar_sub_ = this->create_subscription<ros2_tools::msg::LidarPose>(
-        "lidar_data", 10,
+        lidar_pose_topic_, 10,
         [this](const ros2_tools::msg::LidarPose::SharedPtr msg){ DroneHAL::lidar_cb(msg);});
     state_sub_ = this->create_subscription<mavros_msgs::msg::State>(
         "/mavros/state", 10,
@@ -66,6 +82,9 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
     carrier_pose_sub_ = this->create_subscription<ros2_tools::msg::LidarPose>(
         carrier_pose_topic_, carrier_pose_qos,
         [this](const ros2_tools::msg::LidarPose::SharedPtr msg){ DroneHAL::carrier_pose_cb(msg); });
+    car_status_sub_ = this->create_subscription<std_msgs::msg::String>(
+        car_status_topic_, 10,
+        [this](const std_msgs::msg::String::SharedPtr msg){ DroneHAL::car_status_cb(msg); });
     mission_command_sub_ = this->create_subscription<std_msgs::msg::String>(
         mission_command_topic_, 10,
         [this](const std_msgs::msg::String::SharedPtr msg){ DroneHAL::mission_command_cb(msg); });
@@ -84,14 +103,21 @@ DroneHAL::DroneHAL() : Node("drone_hal_node") {
         platform_target_topic_.c_str());
     RCLCPP_INFO(
         this->get_logger(),
-        "[DroneHAL] 空地协同位姿订阅: carrier_pose_topic=%s",
-        carrier_pose_topic_.c_str());
+        "[DroneHAL] 位姿订阅: lidar_pose_topic=%s, carrier_pose_topic=%s, car_status_topic=%s",
+        lidar_pose_topic_.c_str(),
+        carrier_pose_topic_.c_str(),
+        car_status_topic_.c_str());
     RCLCPP_INFO(
         this->get_logger(),
         "[DroneHAL] 地面站接口: command=%s, status=%s, airdrop=%s",
         mission_command_topic_.c_str(),
         drone_status_topic_.c_str(),
         airdrop_cmd_topic_.c_str());
+    RCLCPP_INFO(
+        this->get_logger(),
+        "[DroneHAL] 场地坐标转换: enabled=%s, origin=(%.2f, %.2f, %.2f), yaw=%.2f rad",
+        field_frame_enabled_ ? "true" : "false",
+        field_origin_x_, field_origin_y_, field_origin_z_, field_origin_yaw_);
 }
 
 // ===== 接口组 =====
@@ -186,12 +212,52 @@ int DroneHAL::get_mission_task_id() const {
     return mission_task_id_;
 }
 
+int DroneHAL::get_car_wp_index() const {
+    std::lock_guard<std::mutex> lock(car_status_mutex_);
+    return car_wp_index_;
+}
+
+int DroneHAL::get_car_task_id() const {
+    std::lock_guard<std::mutex> lock(car_status_mutex_);
+    return car_task_id_;
+}
+
+bool DroneHAL::has_recent_car_status(double max_age_sec) const {
+    std::lock_guard<std::mutex> lock(car_status_mutex_);
+    if (!has_car_status_) {
+        return false;
+    }
+
+    const double age_sec = (this->now() - car_status_rx_time_).seconds();
+    return age_sec >= 0.0 && age_sec <= max_age_sec;
+}
+
 void DroneHAL::clear_mission_start() {
     std::lock_guard<std::mutex> lock(mission_mutex_);
     mission_start_requested_ = false;
 }
 
 void DroneHAL::publish_drone_status(const std::string& phase, const std::string& detail) {
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        last_status_phase_ = phase;
+        last_status_detail_ = detail;
+    }
+    publish_status_message(phase, detail);
+}
+
+void DroneHAL::publish_status_heartbeat() {
+    std::string phase;
+    std::string detail;
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        phase = last_status_phase_;
+        detail = last_status_detail_;
+    }
+    publish_status_message(phase, detail);
+}
+
+void DroneHAL::publish_status_message(const std::string& phase, const std::string& detail) {
     std_msgs::msg::String msg;
     const DroneState s = get_state();
     const int task_id = get_mission_task_id();
@@ -313,14 +379,50 @@ float DroneHAL::normalize_angle(float angle_rad) {
     return std::remainder(angle_rad, 2.0f * static_cast<float>(M_PI));
 }
 
+Target DroneHAL::field_target_to_px4_local(const Target& target) const {
+    if (!field_frame_enabled_) {
+        return target;
+    }
+
+    const float dx = target.get_x() - field_origin_x_;
+    const float dy = target.get_y() - field_origin_y_;
+    const float cos_offset = std::cos(field_origin_yaw_);
+    const float sin_offset = std::sin(field_origin_yaw_);
+    const float local_x = cos_offset * dx + sin_offset * dy;
+    const float local_y = -sin_offset * dx + cos_offset * dy;
+    const float local_z = target.get_z() - field_origin_z_;
+    const float local_yaw = normalize_angle(target.get_yaw() - field_origin_yaw_);
+    return Target(local_x, local_y, local_z, local_yaw);
+}
+
+Velocity DroneHAL::field_velocity_to_px4_local(const Velocity& velocity) const {
+    if (!field_frame_enabled_) {
+        return velocity;
+    }
+
+    const float cos_offset = std::cos(field_origin_yaw_);
+    const float sin_offset = std::sin(field_origin_yaw_);
+    const float local_vx = cos_offset * velocity.get_vx() + sin_offset * velocity.get_vy();
+    const float local_vy = -sin_offset * velocity.get_vx() + cos_offset * velocity.get_vy();
+    return Velocity(
+        local_vx,
+        local_vy,
+        velocity.get_vz(),
+        velocity.get_vyaw(),
+        velocity.get_vpitch(),
+        velocity.get_vroll());
+}
+
 void DroneHAL::publish_px4_drone_position(Target& target) {
-    target.set_time(this->now());
-    pos_pub_->publish(target.get_pose());
+    Target local_target = field_target_to_px4_local(target);
+    local_target.set_time(this->now());
+    pos_pub_->publish(local_target.get_pose());
 }
 
 void DroneHAL::publish_px4_drone_velocity(Velocity& velocity) {
-    velocity.set_time(this->now());
-    vel_pub_->publish(velocity.get_twist());
+    Velocity local_velocity = field_velocity_to_px4_local(velocity);
+    local_velocity.set_time(this->now());
+    vel_pub_->publish(local_velocity.get_twist());
 }
 
 void DroneHAL::publish_car_position_target(const Target& target, bool use_custom_ackermann) {
@@ -468,6 +570,19 @@ void DroneHAL::carrier_pose_cb(const ros2_tools::msg::LidarPose::SharedPtr msg) 
     carrier_pose_.yaw = msg->yaw;
     carrier_pose_rx_time_ = this->now();
     has_carrier_pose_ = true;
+}
+
+void DroneHAL::car_status_cb(const std_msgs::msg::String::SharedPtr msg) {
+    int wp_index = -1;
+    int task_id = 0;
+    extract_json_int(msg->data, "wp_index", wp_index);
+    extract_json_int(msg->data, "task", task_id);
+
+    std::lock_guard<std::mutex> lock(car_status_mutex_);
+    car_wp_index_ = wp_index;
+    car_task_id_ = task_id;
+    car_status_rx_time_ = this->now();
+    has_car_status_ = true;
 }
 
 void DroneHAL::mission_command_cb(const std_msgs::msg::String::SharedPtr msg) {

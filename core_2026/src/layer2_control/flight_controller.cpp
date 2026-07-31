@@ -35,9 +35,9 @@ void FlightController::fly_to_target(
 
 void FlightController::fly_to_target_pid(
     const Target& target,
-    float timeout_sec, float stable_time_sec, int frame_rate)
+    float timeout_sec, float stable_time_sec, int frame_rate, float acceptance_distance)
 {
-    fly_to_target_pid_impl(target, timeout_sec, stable_time_sec, frame_rate);
+    fly_to_target_pid_impl(target, timeout_sec, stable_time_sec, frame_rate, acceptance_distance);
 }
 
 
@@ -70,7 +70,7 @@ void FlightController::fly_to_target_impl(
 // 定点移动（PID）impl
 void FlightController::fly_to_target_pid_impl(
     const Target& target,
-    float timeout_sec, float stable_time_sec, int frame_rate)
+    float timeout_sec, float stable_time_sec, int frame_rate, float acceptance_distance)
 {
     PidController pid_x(pid_cfg_.xy);
     PidController pid_y(pid_cfg_.xy);
@@ -93,9 +93,15 @@ void FlightController::fly_to_target_pid_impl(
             break;
         }
 
-        if (pos_check(target)) {
+        if (pos_check(target, acceptance_distance)) {
             if (++stable_count >= required) {
-                RCLCPP_INFO(logger_, "[fly_to_target_pid]: 到达目标点：(%.2f, %.2f, %.2f)", target.get_x(), target.get_y(), target.get_z());
+                RCLCPP_INFO(
+                    logger_,
+                    "[fly_to_target_pid]: 到达目标点：(%.2f, %.2f, %.2f), 判定半径 %.2fm",
+                    target.get_x(),
+                    target.get_y(),
+                    target.get_z(),
+                    acceptance_distance);
                 break;
             }
         } else { stable_count = 0; }
@@ -117,7 +123,7 @@ void FlightController::fly_by_velocity(const Velocity& velocity) {
 
 // 单次速度发布impl
 void FlightController::fly_by_velocity_impl(const Velocity& velocity) {
-    Velocity cmd_vel = velocity; // 创建可修改副本（设置时间戳用）
+    Velocity cmd_vel = limit_linear_speed(velocity);
     cmd_.publish_velocity(cmd_vel);
 }
 
@@ -131,15 +137,17 @@ void FlightController::fly_by_vel_duration_impl(const Velocity& velocity, float 
     const rclcpp::Time start_time = clock_->now();
     const float start_altitude = state_.get_state().z;
     Velocity vel_cmd = velocity;
+    const bool has_commanded_vz = std::abs(velocity.get_vz()) > 1.0e-3f;
 
     while (rclcpp::ok()) {
         if ((clock_->now() - start_time).seconds() >= duration) break;
 
-        // 高度反馈控制（防止漂移）
-        const float z_error = start_altitude - state_.get_state().z;
-        std::abs(z_error) > 0.1f 
-            ? vel_cmd.set_vz(std::clamp(z_error * 1.0f, -0.1f, 0.1f))  // 限幅0.1
-            : vel_cmd.set_vz(0.0f);
+        if (!has_commanded_vz) {
+            const float z_error = start_altitude - state_.get_state().z;
+            std::abs(z_error) > 0.1f
+                ? vel_cmd.set_vz(std::clamp(z_error * 1.0f, -0.1f, 0.1f))
+                : vel_cmd.set_vz(0.0f);
+        }
 
         fly_by_velocity(vel_cmd);
         rate_->sleep();
@@ -165,6 +173,27 @@ void FlightController::follow_carrier(
         forward_offset,
         left_offset,
         max_pose_age_sec,
+        frame_rate);
+}
+
+void FlightController::follow_carrier_until_stable(
+    float timeout_sec,
+    float stable_time_sec,
+    float follow_altitude,
+    float forward_offset,
+    float left_offset,
+    float max_pose_age_sec,
+    float acceptance_distance,
+    int frame_rate)
+{
+    follow_carrier_until_stable_impl(
+        timeout_sec,
+        stable_time_sec,
+        follow_altitude,
+        forward_offset,
+        left_offset,
+        max_pose_age_sec,
+        acceptance_distance,
         frame_rate);
 }
 
@@ -266,11 +295,160 @@ void FlightController::follow_carrier_impl(
     RCLCPP_INFO(logger_, "[follow_carrier]: 跟随阶段结束");
 }
 
+void FlightController::follow_carrier_until_stable_impl(
+    float timeout_sec,
+    float stable_time_sec,
+    float follow_altitude,
+    float forward_offset,
+    float left_offset,
+    float max_pose_age_sec,
+    float acceptance_distance,
+    int frame_rate)
+{
+    if (carrier_ == nullptr) {
+        RCLCPP_ERROR(logger_, "[follow_carrier_until_stable]: 未注入小车/航母位姿接口");
+        return;
+    }
+
+    PidController pid_x(pid_cfg_.xy);
+    PidController pid_y(pid_cfg_.xy);
+    PidController pid_z(pid_cfg_.z);
+    PidController pid_yaw(pid_cfg_.yaw);
+    rclcpp::Rate loop_rate(frame_rate);
+
+    int stable_count = 0;
+    const int required = std::max(1, static_cast<int>(stable_time_sec * frame_rate));
+    rclcpp::Time last_time = clock_->now();
+    const rclcpp::Time start_time = last_time;
+
+    RCLCPP_INFO(
+        logger_,
+        "[follow_carrier_until_stable]: 开始追踪，timeout=%.1fs stable=%.1fs altitude=%.2fm dist=%.2fm",
+        timeout_sec,
+        stable_time_sec,
+        follow_altitude,
+        acceptance_distance);
+
+    while (rclcpp::ok()) {
+        const rclcpp::Time now = clock_->now();
+        if ((now - start_time).seconds() >= timeout_sec) {
+            RCLCPP_WARN(logger_, "[follow_carrier_until_stable]: 超时 %.1fs，结束追踪", timeout_sec);
+            break;
+        }
+
+        const double dt = std::max((now - last_time).seconds(), 1.0e-3);
+        last_time = now;
+
+        if (!carrier_->has_recent_carrier_pose(max_pose_age_sec)) {
+            const DroneState s = state_.get_state();
+            Target hold(s.x, s.y, follow_altitude, s.yaw);
+            cmd_.publish_position(hold);
+            pid_x.reset();
+            pid_y.reset();
+            pid_z.reset();
+            pid_yaw.reset();
+            stable_count = 0;
+            RCLCPP_WARN_THROTTLE(
+                logger_, *clock_, 1000,
+                "[follow_carrier_until_stable]: 小车/航母位姿超时，保持当前位置等待 topic 恢复");
+            loop_rate.sleep();
+            continue;
+        }
+
+        const DroneState carrier = carrier_->get_carrier_pose();
+        const float cos_yaw = std::cos(carrier.yaw);
+        const float sin_yaw = std::sin(carrier.yaw);
+        const float target_x = carrier.x + cos_yaw * forward_offset - sin_yaw * left_offset;
+        const float target_y = carrier.y + sin_yaw * forward_offset + cos_yaw * left_offset;
+        const Target target(target_x, target_y, follow_altitude, carrier.yaw);
+
+        const DroneState s = state_.get_state();
+        const float dx = target.get_x() - s.x;
+        const float dy = target.get_y() - s.y;
+        const float dz = target.get_z() - s.z;
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float yaw_error = std::fabs(shortest_angular_error(target.get_yaw(), s.yaw));
+
+        if (dist < acceptance_distance && yaw_error < 0.2f) {
+            ++stable_count;
+        } else {
+            stable_count = 0;
+        }
+
+        if (stable_count >= required) {
+            fly_by_velocity(Velocity(0.0f, 0.0f, 0.0f, 0.0f));
+            RCLCPP_INFO(
+                logger_,
+                "[follow_carrier_until_stable]: 已追到并稳定 %.1fs，dist=%.2fm yaw_err=%.2frad",
+                stable_time_sec,
+                dist,
+                yaw_error);
+            return;
+        }
+
+        const float vx = pid_x.update(dx, dt);
+        const float vy = pid_y.update(dy, dt);
+        const float vz = pid_z.update(dz, dt);
+        const float vyaw = pid_yaw.update(shortest_angular_error(target.get_yaw(), s.yaw), dt);
+        fly_by_velocity(Velocity(vx, vy, vz, vyaw));
+
+        RCLCPP_INFO_THROTTLE(
+            logger_, *clock_, 1000,
+            "[follow_carrier_until_stable]: target=(%.2f, %.2f, %.2f) dist=%.2fm stable=%d/%d",
+            target.get_x(),
+            target.get_y(),
+            target.get_z(),
+            dist,
+            stable_count,
+            required);
+
+        loop_rate.sleep();
+    }
+
+    fly_by_velocity(Velocity(0.0f, 0.0f, 0.0f, 0.0f));
+}
+
 // 运行时热更新 PID
 void FlightController::set_pid_config(PidConfig cfg) { set_pid_config_impl(cfg); }
 
 // 运行时热更新 PID impl
 void FlightController::set_pid_config_impl(PidConfig cfg) { pid_cfg_ = cfg; }
+
+Velocity FlightController::limit_linear_speed(const Velocity& velocity) const {
+    Velocity limited = velocity;
+    const float vx = velocity.get_vx();
+    const float vy = velocity.get_vy();
+    const float vz = velocity.get_vz();
+    const float planar_speed = std::sqrt(vx * vx + vy * vy);
+    bool limited_any = false;
+
+    if (planar_speed > DEFAULT_MAX_PLANAR_SPEED_MPS) {
+        const float scale = DEFAULT_MAX_PLANAR_SPEED_MPS / planar_speed;
+        limited.set_vx(vx * scale);
+        limited.set_vy(vy * scale);
+        limited_any = true;
+    }
+
+    const float min_vz = -DEFAULT_MAX_DESCENT_SPEED_MPS;
+    const float max_vz = DEFAULT_MAX_ASCENT_SPEED_MPS;
+    const float limited_vz = std::clamp(vz, min_vz, max_vz);
+    if (std::abs(limited_vz - vz) > 1.0e-4f) {
+        limited.set_vz(limited_vz);
+        limited_any = true;
+    }
+
+    if (limited_any) {
+        RCLCPP_WARN_THROTTLE(
+            logger_, *clock_, 1000,
+            "[FlightController] 速度限幅: xy %.2f->%.2f m/s, vz %.2f->%.2f m/s",
+            planar_speed,
+            std::min(planar_speed, DEFAULT_MAX_PLANAR_SPEED_MPS),
+            vz,
+            limited.get_vz());
+    }
+
+    return limited;
+}
 
 // 位置检查（球径）
 bool FlightController::pos_check(const Target& target, float distance) {

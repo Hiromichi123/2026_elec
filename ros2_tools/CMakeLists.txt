@@ -17,7 +17,10 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 
-rosidl_generate_interfaces(${PROJECT_NAME} "msg/LidarPose.msg")
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/LidarPose.msg"
+  "srv/SERVO.srv"
+)
 ament_export_dependencies(rosidl_default_runtime)
 
 add_executable(lidar_data_node src/lidar_data_node.cpp)
@@ -31,7 +34,7 @@ rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typ
 target_link_libraries(lidar_data_node ${cpp_typesupport_target})
 
 ament_target_dependencies(lidar_data_node rclcpp geometry_msgs tf2 tf2_geometry_msgs nav_msgs)
-ament_target_dependencies(lidar_to_px4_bridge rclcpp geometry_msgs nav_msgs)
+ament_target_dependencies(lidar_to_px4_bridge rclcpp geometry_msgs tf2 tf2_geometry_msgs nav_msgs)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -43,5 +46,7 @@ endif()
 install(TARGETS lidar_data_node DESTINATION lib/${PROJECT_NAME})
 install(TARGETS lidar_to_px4_bridge DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY msg DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY srv DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS src/pwm.py DESTINATION lib/${PROJECT_NAME} RENAME pwm_node)
 
 ament_package()
