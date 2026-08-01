@@ -103,7 +103,7 @@ void MissionExecutor::on_follow_carrier() {
         mission_io_.publish_drone_status("FOLLOW", "task1 chase carrier until stable");
         RCLCPP_INFO(
             logger_,
-            "[FOLLOW_CARRIER] 任务1: 追到小车后稳定 %.1f s，再执行抛投占位API",
+            "[FOLLOW_CARRIER] 任务1: 巡航伴飞追到小车并稳定 %.1f s",
             kTask1FollowStableSec);
         fc_.follow_carrier_until_stable(
             kTask1FollowTimeoutSec,
@@ -114,19 +114,58 @@ void MissionExecutor::on_follow_carrier() {
             kCarrierPoseMaxAgeSec,
             kTask1FollowTolerance);
 
-        mission_io_.publish_drone_status("AIRDROP", "airdrop release command published");
+        mission_io_.publish_drone_status("DropState", "descend to compensated half-height airdrop point");
+        RCLCPP_INFO(
+            logger_,
+            "[DROP_APPROACH] 下降到半空投掷位 %.2fm，补偿 offset=(forward %.3f, left %.3f)，稳定 %.1f s",
+            kTask1DropAltitude,
+            kAirdropForwardOffset,
+            kAirdropLeftOffset,
+            kTask1DropStableSec);
+        fc_.follow_carrier_until_stable(
+            kTask1FollowTimeoutSec,
+            kTask1DropStableSec,
+            kTask1DropAltitude,
+            kAirdropForwardOffset,
+            kAirdropLeftOffset,
+            kCarrierPoseMaxAgeSec,
+            kTask1DropTolerance);
+
+        mission_io_.publish_drone_status("DropState", "airdrop release command published");
         mission_io_.publish_airdrop_command("release");
         RCLCPP_INFO(logger_, "[AIRDROP] 已发布舵机抛投命令: release");
+
+        mission_io_.publish_drone_status("DropState", "holding after airdrop before return");
+        RCLCPP_INFO(logger_, "[POST_DROP_HOLD] 投掷完成，原地悬停 %.1f s 后返航", kTask1PostDropHoldSec);
+        rclcpp::Rate hold_rate(20);
+        const auto hold_start = steady_clock_.now();
+        while (rclcpp::ok() && (steady_clock_.now() - hold_start).seconds() < kTask1PostDropHoldSec) {
+            const DroneState s = state_.get_state();
+            Target hold_target(s.x, s.y, s.z, s.yaw);
+            cmd_.publish_position(hold_target);
+            hold_rate.sleep();
+        }
     } else if (task_id == 2) {
         mission_io_.publish_drone_status("WAIT_CD", "task2 following carrier until C-D segment");
-        RCLCPP_INFO(logger_, "[FOLLOW_CARRIER] 任务2: 起飞后不悬停，伴飞等待小车进入CD段(wp_index=%d)", kTask2CdWpIndex);
-        while (rclcpp::ok()) {
+        if (!carrier_.has_recent_carrier_pose(kCarrierPoseMaxAgeSec)
+            || !mission_io_.has_recent_car_status(kTask2CarStatusMaxAgeSec)) {
+            hold_current_position_until_carrier_ready(
+                "WAIT_CARRIER",
+                "task2 waiting for /carrier/lidar_pose and /car/status before follow",
+                false);
+        }
+        RCLCPP_INFO(
+            logger_,
+            "[FOLLOW_CARRIER] 任务2: 起飞后不悬停，以 %.2fm 连续伴飞等待小车进入CD段(wp_index=%d)",
+            kTask2WaitCdAltitude,
+            kTask2CdWpIndex);
+        auto car_reached_cd = [this]() {
             if (mission_io_.has_recent_car_status(kTask2CarStatusMaxAgeSec)) {
                 const int car_wp = mission_io_.get_car_wp_index();
                 const int car_task = mission_io_.get_car_task_id();
                 if (car_task == 2 && car_wp >= kTask2CdWpIndex) {
                     RCLCPP_INFO(logger_, "[FOLLOW_CARRIER] 小车已进入CD段: task=%d wp_index=%d", car_task, car_wp);
-                    break;
+                    return true;
                 }
             } else {
                 RCLCPP_WARN_THROTTLE(
@@ -134,12 +173,27 @@ void MissionExecutor::on_follow_carrier() {
                     "[FOLLOW_CARRIER] 等待 /car/status 以判断CD段");
             }
 
-            fc_.follow_carrier(
-                kTask2WaitCdFollowSliceSec,
-                kHomeAltitude,
-                kCarrierForwardOffset,
-                kCarrierLeftOffset,
-                kCarrierPoseMaxAgeSec);
+            return false;
+        };
+        fc_.follow_carrier_until(
+            kTask2WaitCdTimeoutSec,
+            car_reached_cd,
+            kTask2WaitCdAltitude,
+            kCarrierForwardOffset,
+            kCarrierLeftOffset,
+            kCarrierPoseMaxAgeSec,
+            20,
+            false);
+        if (!mission_io_.has_recent_car_status(kTask2CarStatusMaxAgeSec)
+            || mission_io_.get_car_task_id() != 2
+            || mission_io_.get_car_wp_index() < kTask2CdWpIndex) {
+            RCLCPP_WARN(
+                logger_,
+                "[FOLLOW_CARRIER] 未确认小车进入CD段，进入原地等待保护，不自动返航/降落");
+            hold_current_position_until_carrier_ready(
+                "WAIT_CARRIER",
+                "task2 did not reach C-D segment before timeout; holding for recovery",
+                true);
         }
 
         mission_io_.publish_drone_status("LAND_ON_CARRIER", "dynamic landing on carrier");
@@ -151,7 +205,7 @@ void MissionExecutor::on_follow_carrier() {
             kCarrierLeftOffset,
             kCarrierPoseMaxAgeSec);
 
-        mission_io_.publish_drone_status("STAY_ON_CARRIER", "holding on carrier for 5 seconds");
+        mission_io_.publish_drone_status("STAY_ON_CARRIER", "holding on carrier for 6 seconds");
         RCLCPP_INFO(logger_, "[STAY_ON_CARRIER] 发布小车投影位置 z=%.1f 模拟不可达降落，持续 %.1f s",
             kCarrierLandingProjectionZ, kTask2StayOnCarrierSec);
         rclcpp::Rate hold_rate(20);
@@ -185,6 +239,49 @@ void MissionExecutor::on_follow_carrier() {
         "[FOLLOW_CARRIER] 任务%d协同阶段结束，切换 RETURN_HOME",
         task_id);
     current_state_ = State::RETURN_HOME;
+}
+
+void MissionExecutor::hold_current_position_until_carrier_ready(
+    const char* phase,
+    const char* detail,
+    bool require_cd_segment) {
+    rclcpp::Rate hold_rate(20);
+    const DroneState s = state_.get_state();
+    Target hold_target(s.x, s.y, s.z, s.yaw);
+    mission_io_.publish_drone_status(phase, detail);
+    RCLCPP_WARN(
+        logger_,
+        "[%s] %s，保持当前位置: (%.2f, %.2f, %.2f)",
+        phase,
+        detail,
+        hold_target.get_x(),
+        hold_target.get_y(),
+        hold_target.get_z());
+
+    while (rclcpp::ok()) {
+        const bool inputs_ready =
+            carrier_.has_recent_carrier_pose(kCarrierPoseMaxAgeSec)
+            && mission_io_.has_recent_car_status(kTask2CarStatusMaxAgeSec);
+        const bool cd_ready =
+            inputs_ready
+            && mission_io_.get_car_task_id() == 2
+            && mission_io_.get_car_wp_index() >= kTask2CdWpIndex;
+        if (inputs_ready && (!require_cd_segment || cd_ready)) {
+            mission_io_.publish_drone_status("WAIT_CD", "carrier/status recovered, resume task2 follow");
+            RCLCPP_INFO(logger_, "[%s] 小车数据%s，继续任务2",
+                phase,
+                require_cd_segment ? "已到CD段" : "恢复");
+            return;
+        }
+
+        cmd_.publish_position(hold_target);
+        RCLCPP_WARN_THROTTLE(
+            logger_, steady_clock_, 2000,
+            "[%s] 等待 /carrier/lidar_pose 和 /car/status%s，持续原地悬停",
+            phase,
+            require_cd_segment ? " 进入CD段" : "");
+        hold_rate.sleep();
+    }
 }
 
 // 状态：RETURN_HOME - 回到起始等待点 (0, 0, 1)

@@ -46,6 +46,7 @@ private:
     void on_follow_carrier();
     void on_return_home();
     void on_land();
+    void hold_current_position_until_carrier_ready(const char* phase, const char* detail, bool require_cd_segment);
 
     // ===== 具名常量组 =====
 	    static constexpr float  kHomeAltitude             = 1.40f;  // 巡航高度: 140cm
@@ -53,16 +54,22 @@ private:
 	    static constexpr float  kTask1FollowTimeoutSec    = 60.0f;  // 任务一：最长追踪时间
 	    static constexpr float  kTask1FollowStableSec     = 1.0f;   // 任务一：追到后稳定伴飞时间
 	    static constexpr float  kTask1FollowTolerance     = 0.25f;  // 任务一：追到判定半径
-	    static constexpr float  kTask2SearchFollowSec     = 5.0f;   // 任务二巡航寻找/跟随
-	    static constexpr float  kTask2WaitCdFollowSliceSec = 0.5f;  // 任务二等待CD段时的伴飞片段
+	    static constexpr float  kTask1DropAltitude        = 0.90f;  // 任务一：半空投掷高度
+	    static constexpr float  kTask1DropStableSec       = 1.0f;   // 任务一：半空投掷前稳定时间
+	    static constexpr float  kTask1DropTolerance       = 0.12f;  // 任务一：半空投掷判定半径
+	    static constexpr float  kTask1PostDropHoldSec     = 4.0f;   // 任务一：投掷后原地悬停时间
+	    static constexpr float  kTask2WaitCdTimeoutSec    = 45.0f;  // 任务二等待CD段最长时间
+	    static constexpr float  kTask2WaitCdAltitude      = kHomeAltitude; // 任务二AB段按巡航高度伴飞
 	    static constexpr int    kTask2CdWpIndex           = 8;      // 小车C->D直线段航点索引
 	    static constexpr float  kTask2CarStatusMaxAgeSec  = 1.0f;   // 小车状态最大允许延迟
 	    static constexpr float  kTask2CarrierLandSec      = 7.0f;   // 任务二CD段动态缓降
-	    static constexpr float  kTask2StayOnCarrierSec    = 5.0f;   // 任务二车上停留
+	    static constexpr float  kTask2StayOnCarrierSec    = 6.0f;   // 任务二车上停留
 	    static constexpr float  kTask2CarrierTakeoffSec   = 3.0f;   // 任务二从车上复飞
 	    static constexpr float  kCarrierPoseMaxAgeSec     = 0.5f;   // 小车位姿最大允许延迟
 	    static constexpr float  kCarrierForwardOffset     = 0.0f;   // 沿小车前方偏移
 	    static constexpr float  kCarrierLeftOffset        = 0.0f;   // 沿小车左侧偏移
+	    static constexpr float  kAirdropForwardOffset     = 0.0f;   // 投掷器前后安装补偿
+	    static constexpr float  kAirdropLeftOffset        = -0.065f; // 投掷器在机体左侧6.5cm，机体右移补偿
 	    static constexpr float  kCarrierLandingAltitude   = 0.15f;  // 车载平台上方低高度
 	    static constexpr float  kCarrierLandingProjectionZ = -5.0f; // 模拟降落不可达投影高度
     static constexpr float  kLandVz           = -0.20f;   // 降落速度

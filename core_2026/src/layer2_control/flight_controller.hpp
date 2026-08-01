@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 
@@ -13,7 +14,7 @@
 #include "named_args.hpp"
 
 constexpr float DEFAULT_POS_CHECK_DISTANCE = 0.25f;
-constexpr float DEFAULT_MAX_PLANAR_SPEED_MPS = 0.30f;
+constexpr float DEFAULT_MAX_PLANAR_SPEED_MPS = 0.40f;
 constexpr float DEFAULT_MAX_ASCENT_SPEED_MPS = 1.00f;
 constexpr float DEFAULT_MAX_DESCENT_SPEED_MPS = 0.20f;
 
@@ -105,6 +106,15 @@ public:
                         float max_pose_age_sec = 0.5f,
                         int frame_rate = 20);
 
+    void follow_carrier_until(float timeout_sec,
+                              std::function<bool()> stop_condition,
+                              float follow_altitude,
+                              float forward_offset = 0.0f,
+                              float left_offset = 0.0f,
+                              float max_pose_age_sec = 0.5f,
+                              int frame_rate = 20,
+                              bool stop_on_exit = true);
+
     void follow_carrier_until_stable(float timeout_sec,
                                      float stable_time_sec,
                                      float follow_altitude,
@@ -172,6 +182,15 @@ private:
                              float left_offset,
                              float max_pose_age_sec,
                              int frame_rate);
+
+    void follow_carrier_until_impl(float timeout_sec,
+                                   const std::function<bool()>& stop_condition,
+                                   float follow_altitude,
+                                   float forward_offset,
+                                   float left_offset,
+                                   float max_pose_age_sec,
+                                   int frame_rate,
+                                   bool stop_on_exit);
 
     void follow_carrier_until_stable_impl(float timeout_sec,
                                           float stable_time_sec,

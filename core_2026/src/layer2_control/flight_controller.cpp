@@ -176,6 +176,27 @@ void FlightController::follow_carrier(
         frame_rate);
 }
 
+void FlightController::follow_carrier_until(
+    float timeout_sec,
+    std::function<bool()> stop_condition,
+    float follow_altitude,
+    float forward_offset,
+    float left_offset,
+    float max_pose_age_sec,
+    int frame_rate,
+    bool stop_on_exit)
+{
+    follow_carrier_until_impl(
+        timeout_sec,
+        stop_condition,
+        follow_altitude,
+        forward_offset,
+        left_offset,
+        max_pose_age_sec,
+        frame_rate,
+        stop_on_exit);
+}
+
 void FlightController::follow_carrier_until_stable(
     float timeout_sec,
     float stable_time_sec,
@@ -293,6 +314,103 @@ void FlightController::follow_carrier_impl(
 
     fly_by_velocity(Velocity(0.0f, 0.0f, 0.0f, 0.0f));
     RCLCPP_INFO(logger_, "[follow_carrier]: 跟随阶段结束");
+}
+
+void FlightController::follow_carrier_until_impl(
+    float timeout_sec,
+    const std::function<bool()>& stop_condition,
+    float follow_altitude,
+    float forward_offset,
+    float left_offset,
+    float max_pose_age_sec,
+    int frame_rate,
+    bool stop_on_exit)
+{
+    if (carrier_ == nullptr) {
+        RCLCPP_ERROR(logger_, "[follow_carrier_until]: 未注入小车/航母位姿接口");
+        return;
+    }
+
+    PidController pid_x(pid_cfg_.xy);
+    PidController pid_y(pid_cfg_.xy);
+    PidController pid_z(pid_cfg_.z);
+    PidController pid_yaw(pid_cfg_.yaw);
+    rclcpp::Rate loop_rate(frame_rate);
+
+    rclcpp::Time last_time = clock_->now();
+    const rclcpp::Time start_time = last_time;
+    bool stopped_by_condition = false;
+
+    RCLCPP_INFO(
+        logger_,
+        "[follow_carrier_until]: 开始连续跟随，timeout=%.1fs altitude=%.2fm offset=(forward %.2f, left %.2f)",
+        timeout_sec,
+        follow_altitude,
+        forward_offset,
+        left_offset);
+
+    while (rclcpp::ok()) {
+        const rclcpp::Time now = clock_->now();
+        if (stop_condition && stop_condition()) {
+            stopped_by_condition = true;
+            break;
+        }
+        if ((now - start_time).seconds() >= timeout_sec) {
+            RCLCPP_WARN(logger_, "[follow_carrier_until]: 超时 %.1fs，结束连续跟随", timeout_sec);
+            break;
+        }
+
+        const double dt = std::max((now - last_time).seconds(), 1.0e-3);
+        last_time = now;
+
+        if (!carrier_->has_recent_carrier_pose(max_pose_age_sec)) {
+            const DroneState s = state_.get_state();
+            Target hold(s.x, s.y, follow_altitude, s.yaw);
+            cmd_.publish_position(hold);
+            pid_x.reset();
+            pid_y.reset();
+            pid_z.reset();
+            pid_yaw.reset();
+            RCLCPP_WARN_THROTTLE(
+                logger_, *clock_, 1000,
+                "[follow_carrier_until]: 小车/航母位姿超时，保持当前位置等待 topic 恢复");
+            loop_rate.sleep();
+            continue;
+        }
+
+        const DroneState carrier = carrier_->get_carrier_pose();
+        const float cos_yaw = std::cos(carrier.yaw);
+        const float sin_yaw = std::sin(carrier.yaw);
+        const float target_x = carrier.x + cos_yaw * forward_offset - sin_yaw * left_offset;
+        const float target_y = carrier.y + sin_yaw * forward_offset + cos_yaw * left_offset;
+        const Target target(target_x, target_y, follow_altitude, carrier.yaw);
+
+        const DroneState s = state_.get_state();
+        const float vx = pid_x.update(target.get_x() - s.x, dt);
+        const float vy = pid_y.update(target.get_y() - s.y, dt);
+        const float vz = pid_z.update(target.get_z() - s.z, dt);
+        const float vyaw = pid_yaw.update(shortest_angular_error(target.get_yaw(), s.yaw), dt);
+        fly_by_velocity(Velocity(vx, vy, vz, vyaw));
+
+        RCLCPP_INFO_THROTTLE(
+            logger_, *clock_, 1000,
+            "[follow_carrier_until]: carrier=(%.2f, %.2f, yaw %.2f) target=(%.2f, %.2f, %.2f)",
+            carrier.x,
+            carrier.y,
+            carrier.yaw,
+            target.get_x(),
+            target.get_y(),
+            target.get_z());
+
+        loop_rate.sleep();
+    }
+
+    if (stop_on_exit) {
+        fly_by_velocity(Velocity(0.0f, 0.0f, 0.0f, 0.0f));
+    }
+    if (stopped_by_condition) {
+        RCLCPP_INFO(logger_, "[follow_carrier_until]: 外部条件满足，结束连续跟随");
+    }
 }
 
 void FlightController::follow_carrier_until_stable_impl(
